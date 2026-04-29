@@ -9,9 +9,10 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTORCC ON)
 
-find_package(Qt6 REQUIRED COMPONENTS Widgets Sql)
+find_package(Qt6 REQUIRED COMPONENTS Core Widgets Sql)
 find_package(SQLite3 REQUIRED)
 
+# 主程序
 add_executable(OfflineKB
     main.cpp
     include/mainwindow.h
@@ -19,19 +20,44 @@ add_executable(OfflineKB
     include/databasemanager.h
     src/databasemanager.cpp
     include/document.h
+    include/searchengine.h
+    src/searchengine.cpp
+    include/tokenizer.h
+    src/tokenizer.cpp
+    resources/dict.qrc
 )
 
-target_include_directories(OfflineKB PRIVATE include)
+target_include_directories(OfflineKB PRIVATE
+    include
+    third_party/cppjieba
+    third_party/cppjieba/include
+    third_party/cppjieba/limonp/include
+)
 
-target_link_libraries(OfflineKB PRIVATE Qt6::Widgets Qt6::Sql)
+target_link_libraries(OfflineKB PRIVATE
+    Qt6::Core
+    Qt6::Widgets
+    Qt6::Sql
+    SQLite3::SQLite3
+)
 
-if(TARGET SQLite::SQLite3)
-    target_link_libraries(OfflineKB PRIVATE SQLite::SQLite3)
-elseif(TARGET SQLite3::SQLite3)
-    target_link_libraries(OfflineKB PRIVATE SQLite3::SQLite3)
-elseif(DEFINED SQLite3_LIBRARIES)
-    target_include_directories(OfflineKB PRIVATE ${SQLite3_INCLUDE_DIRS})
-    target_link_libraries(OfflineKB PRIVATE ${SQLite3_LIBRARIES})
-else()
-    message(FATAL_ERROR "Unable to link SQLite3 target or libraries.")
-endif()
+# 测试程序
+add_executable(test_search
+    tests/test_search.cpp
+    include/document.h
+    include/searchengine.h
+    src/searchengine.cpp
+    include/tokenizer.h
+    src/tokenizer.cpp
+)
+
+target_include_directories(test_search PRIVATE
+    include
+    third_party/cppjieba
+    third_party/cppjieba/include
+    third_party/cppjieba/limonp/include
+)
+
+target_link_libraries(test_search PRIVATE
+    Qt6::Core
+)

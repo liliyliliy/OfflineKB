@@ -3,6 +3,8 @@
 #include "document.h"
 
 #include <QAction>
+#include <QCoreApplication>
+#include <QDebug>
 #include <QDir>
 #include <QDragEnterEvent>
 #include <QFile>
@@ -29,7 +31,9 @@ MainWindow::MainWindow(QWidget* parent)
       searchLineEdit_(nullptr),
       searchButton_(nullptr),
       documentListWidget_(nullptr),
-      previewTextEdit_(nullptr) {
+      previewTextEdit_(nullptr),
+      searchEngine_(nullptr),
+      tokenizer_(nullptr) {
     setWindowTitle(QString::fromUtf8("离线知识库系统"));
     resize(1100, 700);
     setAcceptDrops(true);
@@ -43,6 +47,51 @@ MainWindow::MainWindow(QWidget* parent)
     setupUi();
     setupMenus();
     refreshDocumentList();
+
+    try {
+        // ===== 词典路径自检日志 =====
+        const QString appDir = QCoreApplication::applicationDirPath();
+        const QString dictDir = QDir(appDir).absoluteFilePath("../resources/dict");
+
+        qDebug() << "应用目录 appDir =" << appDir;
+        qDebug() << "词典目录 dictDir =" << dictDir;
+        qDebug() << "词典目录存在 =" << QDir(dictDir).exists();
+
+        const QString dictPath = QDir(dictDir).filePath("jieba.dict.utf8");
+        const QString hmmPath = QDir(dictDir).filePath("hmm_model.utf8");
+        const QString userDictPath = QDir(dictDir).filePath("user.dict.utf8");
+        const QString idfPath = QDir(dictDir).filePath("idf.utf8");
+        const QString stopWordPath = QDir(dictDir).filePath("stop_words.utf8");
+
+        qDebug() << "[词典检查] jieba.dict.utf8 =" << QFileInfo::exists(dictPath) << dictPath;
+        qDebug() << "[词典检查] hmm_model.utf8 =" << QFileInfo::exists(hmmPath) << hmmPath;
+        qDebug() << "[词典检查] user.dict.utf8 =" << QFileInfo::exists(userDictPath) << userDictPath;
+        qDebug() << "[词典检查] idf.utf8 =" << QFileInfo::exists(idfPath) << idfPath;
+        qDebug() << "[词典检查] stop_words.utf8 =" << QFileInfo::exists(stopWordPath) << stopWordPath;
+        // ===== 词典路径自检日志结束 =====
+
+        const std::string dictDirStd = QDir::toNativeSeparators(dictDir).toStdString();
+
+        tokenizer_ = new Tokenizer(dictDirStd);
+        searchEngine_ = new SearchEngine(dictDirStd);
+
+        const QVector<Document> docs = databaseManager_.searchDocuments(QString());
+        std::vector<Document> allDocs;
+        allDocs.reserve(docs.size());
+        for (const auto& doc : docs) {
+            allDocs.push_back(doc);
+        }
+        searchEngine_->buildIndex(allDocs);
+    } catch (const std::exception& ex) {
+        QMessageBox::warning(this, QString::fromUtf8("检索初始化失败"), QString::fromUtf8(ex.what()));
+    }
+}
+
+MainWindow::~MainWindow() {
+    delete searchEngine_;
+    searchEngine_ = nullptr;
+    delete tokenizer_;
+    tokenizer_ = nullptr;
 }
 
 void MainWindow::setupUi() {
@@ -69,8 +118,8 @@ void MainWindow::setupUi() {
     setCentralWidget(centralWidget);
     statusBar()->showMessage(QString::fromUtf8("文档总数: 0"));
 
-    connect(searchButton_, &QPushButton::clicked, this, &MainWindow::onSearchDocuments);
-    connect(searchLineEdit_, &QLineEdit::returnPressed, this, &MainWindow::onSearchDocuments);
+    connect(searchButton_, &QPushButton::clicked, this, &MainWindow::onSearch);
+    connect(searchLineEdit_, &QLineEdit::returnPressed, this, &MainWindow::onSearch);
     connect(documentListWidget_, &QListWidget::itemClicked, this, &MainWindow::onDocumentClicked);
 }
 
@@ -97,10 +146,29 @@ void MainWindow::onImportDocuments() {
     importFiles(files);
 }
 
-void MainWindow::onSearchDocuments() {
-    refreshDocumentList(searchLineEdit_->text().trimmed());
-}
+void MainWindow::onSearch() {
+    const QString keyword = searchLineEdit_->text().trimmed();
+    if (keyword.isEmpty()) {
+        refreshDocumentList();
+        return;
+    }
 
+    if (searchEngine_ == nullptr) {
+        refreshDocumentList(keyword);
+        return;
+    }
+
+    try {
+        // 查询词使用 UTF-8，确保中文查询分词正确
+        const QByteArray queryUtf8 = keyword.toUtf8();
+        const std::string query(queryUtf8.constData(), static_cast<size_t>(queryUtf8.size()));
+
+        const auto results = searchEngine_->search(query);
+        refreshSearchResults(results);
+    } catch (const std::exception& ex) {
+        QMessageBox::warning(this, QString::fromUtf8("搜索失败"), QString::fromUtf8(ex.what()));
+    }
+}
 void MainWindow::onDocumentClicked(QListWidgetItem* item) {
     if (item == nullptr) {
         return;
@@ -167,6 +235,28 @@ void MainWindow::refreshDocumentList(const QString& keyword) {
     updateStatusBarCount();
 }
 
+void MainWindow::refreshSearchResults(const std::vector<std::pair<int, double>>& results) {
+    documentListWidget_->clear();
+    previewTextEdit_->clear();
+
+    for (const auto& [docId, score] : results) {
+        try {
+            const Document doc = databaseManager_.getDocumentById(docId);
+            QString displayTitle = doc.title.trimmed();
+            if (displayTitle.isEmpty()) {
+                displayTitle = QFileInfo(doc.filePath).fileName();
+            }
+            displayTitle += QString::fromUtf8("  (BM25: %1)").arg(score, 0, 'f', 3);
+            auto* item = new QListWidgetItem(displayTitle, documentListWidget_);
+            item->setData(Qt::UserRole, doc.id);
+            item->setToolTip(doc.filePath);
+        } catch (const std::exception&) {
+            // 忽略不存在或讀取失敗的文檔，保證結果列表穩定展示
+        }
+    }
+    updateStatusBarCount();
+}
+
 void MainWindow::updateStatusBarCount() {
     try {
         const int count = databaseManager_.getDocumentsCount();
@@ -192,11 +282,25 @@ void MainWindow::importFiles(const QStringList& filePaths) {
         }
 
         const QByteArray bytes = file.readAll();
-        const QString content = QString::fromUtf8(bytes);
+        QString content = QString::fromUtf8(bytes);
+
+// 如果出现替换字符，说明 UTF-8 解码失败，回退到系统本地编码（Windows 常见 GBK）
+if (content.contains(QChar::ReplacementCharacter)) {
+    content = QString::fromLocal8Bit(bytes);
+}
         const QString title = QFileInfo(filePath).completeBaseName();
 
         try {
-            databaseManager_.insertDocument(title, content, QDir::toNativeSeparators(filePath));
+            const int newId =
+                databaseManager_.insertDocument(title, content, QDir::toNativeSeparators(filePath));
+            if (searchEngine_ != nullptr) {
+                Document newDoc;
+                newDoc.id = newId;
+                newDoc.title = title;
+                newDoc.content = content;
+                newDoc.filePath = QDir::toNativeSeparators(filePath);
+                searchEngine_->addDocument(newDoc);
+            }
             ++successCount;
         } catch (const std::exception&) {
             failedFiles.push_back(QFileInfo(filePath).fileName());
