@@ -1,9 +1,0 @@
-{
-  "name": "offline-kb",
-  "version": "0.1.0",
-  "description": "全离线智能知识库系统 - C++17 + Qt6 + RAG",
-  "dependencies": [
-    "qtbase",
-    "sqlite3"
-  ]
-}
