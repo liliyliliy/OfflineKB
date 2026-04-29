@@ -28,7 +28,7 @@ pacman -Syu
 pacman -S mingw-w64-x86_64-qt6-base mingw-w64-x86_64-cmake mingw-w64-x86_64-gcc mingw-w64-x86_64-sqlite3
 
 ### 4. 配置环境变量
-系统 PATH 添加：
+环境变量 PATH 添加：
 - `F:\msys2\mingw64\bin`
 - `F:\msys2\usr\bin`
 
