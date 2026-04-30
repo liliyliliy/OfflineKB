@@ -38,6 +38,24 @@ cd OfflineKB
 cmake -B build -S . -G "MinGW Makefiles"
 cmake --build build
 
+## 数据库设计
+
+### documents 表
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | INTEGER PRIMARY KEY AUTOINCREMENT | 文档唯一ID |
+| title | TEXT | 文档标题（文件名） |
+| content | TEXT | 文档正文内容 |
+| file_path | TEXT | 原始文件路径 |
+| created_at | TEXT | 导入时间 |
+
+### 倒排索引结构（内存）
+| 结构 | 类型 | 说明 |
+|------|------|------|
+| inverted_index_ | unordered_map<string, vector<pair<int, int>>> | 词 → {文档ID, 词频} |
+| doc_lengths_ | unordered_map<int, int> | 文档ID → 总词数 |
+| avg_doc_length_ | double | 平均文档长度（BM25用） |
+
 ## 功能
 
 - 多格式文档解析与智能分块
