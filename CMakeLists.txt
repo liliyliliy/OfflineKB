@@ -12,7 +12,7 @@ set(CMAKE_AUTORCC ON)
 find_package(Qt6 REQUIRED COMPONENTS Core Widgets Sql)
 find_package(SQLite3 REQUIRED)
 
-# 主程序
+# ===== 主程序 =====
 add_executable(OfflineKB
     main.cpp
     include/mainwindow.h
@@ -24,11 +24,17 @@ add_executable(OfflineKB
     src/searchengine.cpp
     include/tokenizer.h
     src/tokenizer.cpp
+    include/vectorindex.h
+    src/vectorindex.cpp
+    include/embeddingengine.h
+    src/embeddingengine.cpp
     resources/dict.qrc
 )
 
 target_include_directories(OfflineKB PRIVATE
     include
+    third_party/hnswlib
+    third_party/hnswlib/hnswlib
     third_party/cppjieba
     third_party/cppjieba/include
     third_party/cppjieba/limonp/include
@@ -39,9 +45,10 @@ target_link_libraries(OfflineKB PRIVATE
     Qt6::Widgets
     Qt6::Sql
     SQLite3::SQLite3
+    "F:/msys2/ucrt64/lib/libonnx.dll.a"
 )
 
-# 测试程序
+# ===== 测试程序 =====
 add_executable(test_search
     tests/test_search.cpp
     include/document.h
@@ -56,6 +63,7 @@ target_include_directories(test_search PRIVATE
     third_party/cppjieba
     third_party/cppjieba/include
     third_party/cppjieba/limonp/include
+    ${Qt6Core_INCLUDE_DIRS}
 )
 
 target_link_libraries(test_search PRIVATE
