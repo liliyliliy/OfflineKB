@@ -38,6 +38,16 @@ cd OfflineKB
 cmake -B build -S . -G "MinGW Makefiles"
 cmake --build build
 
+### 6. 下载模型
+项目使用 Qwen3-4B-Instruct（Q4_K_M 量化，约 2.5GB），通过 ModelScope 下载：
+git clone https://www.modelscope.cn/Qwen/Qwen3-4B-Instruct-GGUF.git
+cp Qwen3-4B-Instruct-GGUF/*.gguf models/
+
+### 7. 安装 Vulkan SDK（可选，GPU 加速）
+从 https://vulkan.lunarg.com/sdk/home 下载并安装。编译时启用 `-DGGML_VULKAN=ON` 可获得 GPU 加速。
+
+若编译失败，系统将自动回退为纯 CPU 推理，使用 `-DGGML_NATIVE=ON` 优化后速度也可接受。
+
 ## 数据库设计
 
 ### documents 表
