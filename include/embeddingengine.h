@@ -16,6 +16,8 @@
 #include <vector>
 
 class Tokenizer;
+struct llama_model;
+struct llama_context;
 
 class EmbeddingEngine {
 public:
@@ -31,10 +33,16 @@ public:
     // 根据词典目录内部创建 Tokenizer（析构时释放）
     void init(const std::string& dictDir);
 
+    // 可选：加载真实 embedding GGUF。失败时返回 false，调用方可继续使用哈希向量回退。
+    bool initEmbeddingModel(const std::string& modelPath, int nGpuLayers = 99);
+
     // 将文本编码为 DIM 维向量；空文本或无有效分词时返回全零向量
     std::vector<float> encode(const std::string& text) const;
 
-    int dimension() const { return DIM; }
+    int dimension() const { return dim_; }
+
+    // 当前 embedding 模型名；未加载真实模型时返回 "hash-embedding"
+    std::string modelName() const { return modelName_; }
 
 private:
     // 由词字符串哈希种子生成单词随机向量（正态分布 N(0,1)）
@@ -48,6 +56,11 @@ private:
 
     Tokenizer* tokenizer_ = nullptr;
     bool ownTokenizer_ = false;
+
+    llama_model* model_ = nullptr;
+    llama_context* ctx_ = nullptr;
+    int dim_ = DIM;
+    std::string modelName_ = "hash-embedding";
 
     static constexpr int DIM = 1024;
 };

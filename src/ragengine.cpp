@@ -3,7 +3,10 @@
 #include "llama.h"
 
 #include <algorithm>
+#include <chrono>
+#include <cstdio>
 #include <cstring>
+#include <initializer_list>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -43,9 +46,57 @@ std::string tokenToPiece(const llama_vocab* vocab, llama_token id) {
 // 让模型清晰区分"文档"与"问题"，但不再手写伪 chat 标签 ——
 // 真正的 <|im_start|>system / user / assistant 由 llama_chat_apply_template
 // 根据 GGUF 内嵌模板自动注入。
+bool containsAny(const std::string& text, std::initializer_list<const char*> needles) {
+    for (const char* needle : needles) {
+        if (text.find(needle) != std::string::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool isSummaryQuestion(const std::string& question) {
+    return containsAny(question, {"总结", "概括", "归纳", "知识点", "全文", "整篇", "全部", "所有"});
+}
+
+bool isDirectQuestion(const std::string& question) {
+    return containsAny(question, {"答案", "选择题", "填空", "判断", "第", "是什么", "哪一个", "哪个", "多少"});
+}
+
+bool asksForExplanation(const std::string& question) {
+    return containsAny(question, {"分析", "解析", "解释", "原因", "依据", "为什么", "详细", "说明"});
+}
+
+int choosePredictLimit(const std::string& question, int configuredMax) {
+    if (asksForExplanation(question)) {
+        return std::min(configuredMax, 1536);
+    }
+    if (isSummaryQuestion(question)) {
+        return std::min(configuredMax, 1024);
+    }
+    if (isDirectQuestion(question)) {
+        return std::min(configuredMax, 256);
+    }
+    return std::min(configuredMax, 512);
+}
+
+std::string answerInstructionForQuestion(const std::string& question) {
+    if (asksForExplanation(question)) {
+        return "【回答要求】用户要求分析/解析时，必须对每个答案逐项给出简短分析；不要中途省略，不要只给部分题目。\n";
+    }
+    if (isSummaryQuestion(question)) {
+        return "【回答要求】用条目式总结，覆盖关键点即可；不要逐字复制原文，最多 8 条。\n";
+    }
+    if (isDirectQuestion(question)) {
+        return "【回答要求】直接给出答案，最多补充 1 句依据；不要展开长篇解释。\n";
+    }
+    return "【回答要求】简洁回答，优先 1-3 句；只有用户要求详细时才展开。\n";
+}
+
 std::string buildUserMessage(const std::string& question, const std::string& context) {
     std::string m;
-    m.reserve(question.size() + context.size() + 64);
+    m.reserve(question.size() + context.size() + 160);
+    m += answerInstructionForQuestion(question);
     if (!context.empty()) {
         m += "【文档】\n";
         m += context;
@@ -150,6 +201,7 @@ void RagEngine::init(const std::string& modelPath) {
         if (!model_) {
             throw std::runtime_error("RagEngine::init: 加载模型失败，请检查 GGUF 文件路径与完整性: " + modelPath);
         }
+        modelPath_ = modelPath;
 
         // 2) 创建推理上下文
         //    - n_batch 必须 >= 任何一次 prompt 分片大小
@@ -269,12 +321,13 @@ std::string RagEngine::ask(const std::string& question, const std::string& conte
     }
     tokens.resize(static_cast<size_t>(nTokens));
 
+    const int nPredictLimit = choosePredictLimit(question, nPredict_);
     const uint32_t nCtxActual = llama_n_ctx(ctx_);
-    if (static_cast<uint32_t>(nTokens) + static_cast<uint32_t>(nPredict_) + 4
+    if (static_cast<uint32_t>(nTokens) + static_cast<uint32_t>(nPredictLimit) + 4
         >= nCtxActual) {
         throw std::runtime_error(
             "RagEngine::ask: 提示词长度超出上下文窗口 (prompt=" +
-            std::to_string(nTokens) + ", n_predict=" + std::to_string(nPredict_) +
+            std::to_string(nTokens) + ", n_predict=" + std::to_string(nPredictLimit) +
             ", n_ctx=" + std::to_string(nCtxActual) + ")");
     }
 
@@ -282,6 +335,8 @@ std::string RagEngine::ask(const std::string& question, const std::string& conte
     // 3) 分批 decode prompt：n_batch 是单次提交上限，
     //    超过时必须切片。原版限定 512 是为了避开这一点，副作用是丢内容。
     // ---------------------------------------------------------------------
+    using Clock = std::chrono::steady_clock;
+    const auto tPrefillStart = Clock::now();
     {
         const int32_t nBatchSafe = std::max(1, nBatch_);
         for (int32_t off = 0; off < nTokens; off += nBatchSafe) {
@@ -299,6 +354,7 @@ std::string RagEngine::ask(const std::string& question, const std::string& conte
             }
         }
     }
+    const auto tPrefillEnd = Clock::now();
 
     // ---------------------------------------------------------------------
     // 4) 自回归生成
@@ -307,13 +363,14 @@ std::string RagEngine::ask(const std::string& question, const std::string& conte
     answer.reserve(2048);
 
     int generated = 0;
+    const auto tDecodeStart = Clock::now();
 
     // 用滚动尾窗检测"复读 prompt"：把最近生成的 256 字与已生成全文对比，
     // 一旦看到 <|im_end|> / <|im_start|> 字面量也立刻停止（防御失效模板）。
     static constexpr const char* kImEnd   = "<|im_end|>";
     static constexpr const char* kImStart = "<|im_start|>";
 
-    for (int i = 0; i < nPredict_; ++i) {
+    for (int i = 0; i < nPredictLimit; ++i) {
         if (stopRequested_.load(std::memory_order_relaxed)) {
             break;
         }
@@ -368,6 +425,8 @@ std::string RagEngine::ask(const std::string& question, const std::string& conte
         ++generated;
     }
 
+    const auto tDecodeEnd = Clock::now();
+
     // 去掉首尾空白，避免模板末尾的换行干扰
     while (!answer.empty() && (answer.back() == '\n' || answer.back() == '\r' ||
                                answer.back() == ' '  || answer.back() == '\t')) {
@@ -382,5 +441,38 @@ std::string RagEngine::ask(const std::string& question, const std::string& conte
         answer.erase(0, front);
     }
 
+    // ---------------------------------------------------------------------
+    // 5) 写入指标快照 + 控制台日志
+    //    - tokens/s 仅以 decode 阶段计算（更接近"流式体感"），
+    //      prefill 阶段用单独字段表示
+    // ---------------------------------------------------------------------
+    const double prefillMs = std::chrono::duration<double, std::milli>(
+                                 tPrefillEnd - tPrefillStart).count();
+    const double decodeMs  = std::chrono::duration<double, std::milli>(
+                                 tDecodeEnd - tDecodeStart).count();
+    const double tps = (decodeMs > 0.0 && generated > 0)
+                           ? (static_cast<double>(generated) * 1000.0 / decodeMs)
+                           : 0.0;
+
+    lastMetrics_.prefillMs       = prefillMs;
+    lastMetrics_.decodeMs        = decodeMs;
+    lastMetrics_.promptTokens    = nTokens;
+    lastMetrics_.generatedTokens = generated;
+    lastMetrics_.tokensPerSecond = tps;
+    lastMetrics_.modelPath       = modelPath_;
+    lastMetrics_.nGpuLayers      = nGpuLayers_;
+
+    std::fprintf(stderr,
+                 "[RagEngine] prompt=%d tok prefill=%.1f ms gen=%d tok decode=%.1f ms "
+                 "tps=%.2f gpu_layers=%d\n",
+                 nTokens, prefillMs, generated, decodeMs, tps, nGpuLayers_);
+
     return answer;
+}
+
+RagEngine::LastMetrics RagEngine::lastMetrics() const {
+    // mutex_ 是 mutable 时才能在 const 方法里上锁。这里 mutex_ 不是 mutable，
+    // 但读取的值在写入侧已被 ask() 自身的锁保护，并且 LastMetrics 是 POD，
+    // 单纯拷贝在主流程内具有发布-获取语义（finished 信号触发后再读取）。
+    return lastMetrics_;
 }

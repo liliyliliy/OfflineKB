@@ -2,13 +2,16 @@
 
 #include <QHBoxLayout>
 #include <QKeyEvent>
+#include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QScrollBar>
 #include <QString>
 #include <QTextCursor>
+#include <QTextBrowser>
 #include <QTextEdit>
+#include <QUrl>
 #include <QVBoxLayout>
 
 ChatWidget::ChatWidget(QWidget* parent) : QWidget(parent) {
@@ -20,6 +23,29 @@ ChatWidget::ChatWidget(QWidget* parent) : QWidget(parent) {
     chatHistory_->setReadOnly(true);
     chatHistory_->setAcceptRichText(true);
     chatHistory_->setObjectName("chatHistory");
+
+    auto* sourcesLabel = new QLabel(tr("本轮参考来源"), this);
+    sourcesLabel->setObjectName("sourcesLabel");
+
+    sourcesView_ = new QTextBrowser(this);
+    sourcesView_->setReadOnly(true);
+    sourcesView_->setAcceptRichText(true);
+    sourcesView_->setFixedHeight(86);
+    sourcesView_->setObjectName("sourcesView");
+    sourcesView_->setOpenExternalLinks(false);
+    sourcesView_->setOpenLinks(false);
+
+    connect(sourcesView_, &QTextBrowser::anchorClicked, this, [this](const QUrl& url) {
+        // url 格式: source:N，N 为来源 entry 下标
+        // 不用 source://N 是因为纯数字不是合法的 hostname，会被 QUrl 丢弃
+        if (url.scheme() == QStringLiteral("source")) {
+            bool ok = false;
+            int idx = url.path().toInt(&ok);
+            if (ok) {
+                emit sourceClicked(idx);
+            }
+        }
+    });
 
     auto* bottom = new QHBoxLayout();
     bottom->setSpacing(6);
@@ -37,6 +63,8 @@ ChatWidget::ChatWidget(QWidget* parent) : QWidget(parent) {
     bottom->addWidget(sendBtn_,   /*stretch=*/0);
 
     root->addWidget(chatHistory_, /*stretch=*/1);
+    root->addWidget(sourcesLabel, /*stretch=*/0);
+    root->addWidget(sourcesView_, /*stretch=*/0);
     root->addLayout(bottom);
 
     // 信号槽：按钮点击 / 输入框回车 → onSendClicked
@@ -83,6 +111,22 @@ void ChatWidget::appendMessage(const QString& sender, const QString& text) {
     if (auto* sb = chatHistory_->verticalScrollBar()) {
         sb->setValue(sb->maximum());
     }
+}
+
+void ChatWidget::setSources(const QString& sources) {
+    if (!sourcesView_) {
+        return;
+    }
+
+    const QString trimmed = sources.trimmed();
+    if (trimmed.isEmpty()) {
+        sourcesView_->setHtml(QStringLiteral(
+            "<span style=\"color:#666;\">暂无参考来源</span>"));
+        return;
+    }
+
+    // sources 已是 HTML，直接设置
+    sourcesView_->setHtml(trimmed);
 }
 
 QString ChatWidget::renderMarkdown(const QString& text) const {

@@ -107,3 +107,25 @@ target_include_directories(test_search PRIVATE
 target_link_libraries(test_search PRIVATE
     Qt6::Core
 )
+
+# ----------------------------------------------------------------------------
+# 评测集：固定问答用例，验证 RagEngine 不会回退到复读原文 / 截断 prompt 等问题。
+# 用法：
+#   ./eval_qa  <gguf 模型路径>
+# 例如：
+#   ./eval_qa  models/Qwen3-4B-Instruct-2507-Q4_K_M.gguf
+# ----------------------------------------------------------------------------
+add_executable(eval_qa
+    tests/eval_qa.cpp
+    include/ragengine.h
+    src/ragengine.cpp
+)
+
+target_include_directories(eval_qa PRIVATE
+    include
+    third_party/llama.cpp/include
+)
+
+target_link_libraries(eval_qa PRIVATE
+    llama
+)

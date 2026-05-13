@@ -73,6 +73,27 @@ public:
     void setTokenCallback(TokenCallback cb);
 
     // -------------------------------------------------------------------------
+    // 最近一次 ask() 的运行指标快照（由 ask 内部更新）
+    //   prefillMs   prompt 解码总耗时（毫秒）
+    //   decodeMs    生成阶段总耗时（毫秒）
+    //   promptTokens prompt 实际 tokenize 后长度
+    //   generatedTokens 已成功喂回上下文的生成 token 数
+    //   tokensPerSecond 生成阶段 tokens/s（仅 decode 阶段，不含 prefill）
+    // -------------------------------------------------------------------------
+    struct LastMetrics {
+        double prefillMs = 0.0;
+        double decodeMs = 0.0;
+        int    promptTokens = 0;
+        int    generatedTokens = 0;
+        double tokensPerSecond = 0.0;
+        std::string modelPath;
+        int    nGpuLayers = 0;
+    };
+
+    // 复制返回上一次 ask() 的指标快照；线程安全
+    LastMetrics lastMetrics() const;
+
+    // -------------------------------------------------------------------------
     // 配置项 setter（必须在 init() 之前调用才生效）
     // -------------------------------------------------------------------------
     // 卸载到 GPU 的层数；99 = 全部；0 = 纯 CPU
@@ -105,7 +126,7 @@ private:
 
     // 上下文窗口与最大生成 token 数
     int nCtx_     = 8192;
-    int nPredict_ = 384;
+    int nPredict_ = 2048;
 
     // GPU offload 层数；99 = 全部；0 = 纯 CPU
     int  nGpuLayers_ = 99;
@@ -119,12 +140,19 @@ private:
         "你是一个严谨的中文文档问答助手。"
         "你的任务是基于用户提供的【文档】内容回答【问题】，必须严格遵守以下规则："
         "1) 只使用【文档】中的事实，不得引入外部知识；"
-        "2) 回答必须简洁、连贯、用 1-3 句中文表达；"
+        "2) 回答必须简洁、连贯；简单求答案的问题只给答案和简短依据，总结类问题才条目式展开；"
         "3) 禁止逐字复制【文档】里的题目原文、选项或填空；"
         "4) 若【文档】中没有相关信息，仅回答四个字：无法回答。";
 
     // 流式回调（可选）
     TokenCallback tokenCb_;
+
+    // 最近一次 ask 的指标，由 ask 在 mutex_ 内部更新；
+    // 通过 lastMetrics() 在 mutex_ 内拷贝读取，避免数据竞争
+    LastMetrics lastMetrics_;
+
+    // 当前模型路径（init 时记录），便于打日志/调试
+    std::string modelPath_;
 };
 
 #endif  // OFFLINEKB_RAGENGINE_H

@@ -24,12 +24,24 @@ public:
     // Query one document by primary key id.
     Document getDocumentById(int id) const;
 
+    // Replace all chunks for one document.
+    void replaceDocumentChunks(int documentId, const QVector<QString>& chunks);
+
+    // Query chunks used by retrieval.
+    QVector<DocumentChunk> getAllChunks() const;
+    QVector<DocumentChunk> getChunksForDocument(int documentId) const;
+    DocumentChunk getChunkById(int chunkId) const;
+
     // Return total document count.
     int getDocumentsCount() const;
+
+    // Directory that stores application data, indexes and sqlite DB.
+    QString appDataDir() const;
 
 private:
     sqlite3* db_;
     QString dbFilePath_;
+    QString appDataDir_;
 
     void ensureOpen() const;
 };

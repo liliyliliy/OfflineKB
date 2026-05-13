@@ -18,6 +18,7 @@
 
 class QLineEdit;
 class QPushButton;
+class QTextBrowser;
 class QTextEdit;
 
 class ChatWidget : public QWidget {
@@ -31,6 +32,9 @@ signals:
     // 用户点击发送或在输入框按下回车时发出
     void sendMessage(const QString& msg);
 
+    // 用户点击来源链接时发出，index 为 source entry 下标
+    void sourceClicked(int index);
+
 public slots:
     // 发送按钮槽（通常由内部信号连接，也可被外部主动调用）
     void onSendClicked();
@@ -40,6 +44,10 @@ public slots:
     //   text   消息正文，支持简单 Markdown
     void appendMessage(const QString& sender, const QString& text);
 
+    // 更新固定来源区域，显示最近一次 RAG 检索命中的来源片段。
+    // 传空字符串时显示“暂无参考来源”。
+    void setSources(const QString& sources);
+
 private:
     // 简单 Markdown 渲染：先 HTML 转义，再替换 **xxx** 与换行
     QString renderMarkdown(const QString& text) const;
@@ -48,6 +56,7 @@ private:
     static QString escapeHtml(const QString& s);
 
     QTextEdit*   chatHistory_ = nullptr;
+    QTextBrowser* sourcesView_ = nullptr;
     QLineEdit*   inputEdit_   = nullptr;
     QPushButton* sendBtn_     = nullptr;
 };

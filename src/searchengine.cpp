@@ -47,6 +47,38 @@ void removeDocumentUnlocked(
     docTermFreqs.erase(tfIt);
     docLengths.erase(docId);
 }
+
+void removeChunkUnlocked(
+    int chunkId,
+    std::unordered_map<std::string, std::vector<std::pair<int, int>>>& invertedIndex,
+    std::unordered_map<int, int>& lengths,
+    std::unordered_map<int, int>& chunkToDoc,
+    std::unordered_map<int, std::unordered_map<std::string, int>>& termFreqs) {
+    auto tfIt = termFreqs.find(chunkId);
+    if (tfIt == termFreqs.end()) {
+        lengths.erase(chunkId);
+        chunkToDoc.erase(chunkId);
+        return;
+    }
+
+    for (const auto& [term, _] : tfIt->second) {
+        auto postIt = invertedIndex.find(term);
+        if (postIt == invertedIndex.end()) {
+            continue;
+        }
+        auto& postings = postIt->second;
+        postings.erase(
+            std::remove_if(postings.begin(), postings.end(),
+                           [chunkId](const auto& entry) { return entry.first == chunkId; }),
+            postings.end());
+        if (postings.empty()) {
+            invertedIndex.erase(postIt);
+        }
+    }
+    termFreqs.erase(tfIt);
+    lengths.erase(chunkId);
+    chunkToDoc.erase(chunkId);
+}
 }  // namespace
 
 SearchEngine::SearchEngine(const std::string& dictDir) : tokenizer_(dictDir) {}
@@ -198,6 +230,153 @@ void SearchEngine::removeDocument(int docId) {
     }
 }
 
+void SearchEngine::buildChunkIndex(const std::vector<ChunkRecord>& chunks) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    chunkInvertedIndex_.clear();
+    chunkLengths_.clear();
+    chunkToDoc_.clear();
+    chunkTermFreqs_.clear();
+
+    try {
+        for (const auto& chunk : chunks) {
+            if (chunk.id < 0) {
+                continue;
+            }
+
+            const QByteArray contentUtf8 = chunk.content.toUtf8();
+            const std::string content(contentUtf8.constData(), static_cast<size_t>(contentUtf8.size()));
+            const auto terms = tokenizer_.tokenize(content);
+
+            chunkLengths_[chunk.id] = static_cast<int>(terms.size());
+            chunkToDoc_[chunk.id] = chunk.documentId;
+            auto& tfMap = chunkTermFreqs_[chunk.id];
+
+            for (const auto& term : terms) {
+                const std::string normalized = normalizeTerm(term);
+                if (!normalized.empty()) {
+                    ++tfMap[normalized];
+                }
+            }
+            for (const auto& [term, tf] : tfMap) {
+                chunkInvertedIndex_[term].push_back({chunk.id, tf});
+            }
+        }
+    } catch (const std::exception& ex) {
+        throw std::runtime_error(std::string("建立 chunk 索引失败: ") + ex.what());
+    }
+}
+
+std::vector<std::pair<int, double>> SearchEngine::searchChunks(const std::string& query, int topK) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<std::pair<int, double>> result;
+
+    if (query.empty() || chunkLengths_.empty() || topK <= 0) {
+        return result;
+    }
+
+    try {
+        const auto qTerms = tokenizer_.tokenize(query);
+        if (qTerms.empty()) {
+            return result;
+        }
+
+        std::unordered_map<int, double> scoreMap;
+        const double avgDl = computeAvgChunkLengthUnlocked();
+        const double chunkCount = static_cast<double>(chunkLengths_.size());
+        std::unordered_set<std::string> seenTerms;
+
+        for (const auto& term : qTerms) {
+            const std::string normalized = normalizeTerm(term);
+            if (normalized.empty() || !seenTerms.insert(normalized).second) {
+                continue;
+            }
+
+            auto it = chunkInvertedIndex_.find(normalized);
+            if (it == chunkInvertedIndex_.end()) {
+                continue;
+            }
+
+            const auto& postings = it->second;
+            const double df = static_cast<double>(postings.size());
+            const double idf = std::log(1.0 + (chunkCount - df + 0.5) / (df + 0.5));
+
+            for (const auto& [chunkId, tfInt] : postings) {
+                const auto lenIt = chunkLengths_.find(chunkId);
+                if (lenIt == chunkLengths_.end()) {
+                    continue;
+                }
+                const double tf = static_cast<double>(tfInt);
+                const double dl = static_cast<double>(lenIt->second);
+                const double denom = tf + kBm25K1 * (1.0 - kBm25B + kBm25B * dl / avgDl);
+                if (denom > 0.0) {
+                    scoreMap[chunkId] += idf * ((tf * (kBm25K1 + 1.0)) / denom);
+                }
+            }
+        }
+
+        result.reserve(scoreMap.size());
+        for (const auto& [chunkId, score] : scoreMap) {
+            result.push_back({chunkId, score});
+        }
+        std::sort(result.begin(), result.end(),
+                  [](const auto& a, const auto& b) { return a.second > b.second; });
+        if (static_cast<int>(result.size()) > topK) {
+            result.resize(static_cast<size_t>(topK));
+        }
+    } catch (const std::exception& ex) {
+        throw std::runtime_error(std::string("chunk 检索失败: ") + ex.what());
+    }
+
+    return result;
+}
+
+void SearchEngine::addChunk(const ChunkRecord& chunk) {
+    if (chunk.id < 0) {
+        throw std::runtime_error("新增 chunk 索引失败: chunk ID 无效");
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    try {
+        removeChunkUnlocked(chunk.id, chunkInvertedIndex_, chunkLengths_, chunkToDoc_, chunkTermFreqs_);
+
+        const QByteArray contentUtf8 = chunk.content.toUtf8();
+        const std::string content(contentUtf8.constData(), static_cast<size_t>(contentUtf8.size()));
+        const auto terms = tokenizer_.tokenize(content);
+
+        chunkLengths_[chunk.id] = static_cast<int>(terms.size());
+        chunkToDoc_[chunk.id] = chunk.documentId;
+        auto& tfMap = chunkTermFreqs_[chunk.id];
+        tfMap.clear();
+
+        for (const auto& term : terms) {
+            const std::string normalized = normalizeTerm(term);
+            if (!normalized.empty()) {
+                ++tfMap[normalized];
+            }
+        }
+        for (const auto& [term, tf] : tfMap) {
+            chunkInvertedIndex_[term].push_back({chunk.id, tf});
+        }
+    } catch (const std::exception& ex) {
+        throw std::runtime_error(std::string("新增 chunk 索引失败: ") + ex.what());
+    }
+}
+
+void SearchEngine::removeChunksForDocument(int documentId) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    std::vector<int> chunkIds;
+    for (const auto& [chunkId, docId] : chunkToDoc_) {
+        if (docId == documentId) {
+            chunkIds.push_back(chunkId);
+        }
+    }
+    for (int chunkId : chunkIds) {
+        removeChunkUnlocked(chunkId, chunkInvertedIndex_, chunkLengths_, chunkToDoc_, chunkTermFreqs_);
+    }
+}
+
 double SearchEngine::computeAvgDocLengthUnlocked() const {
     if (docLengths_.empty()) {
         return 1.0;
@@ -207,5 +386,17 @@ double SearchEngine::computeAvgDocLengthUnlocked() const {
         sum += len;
     }
     const double avg = static_cast<double>(sum) / static_cast<double>(docLengths_.size());
+    return avg > 0.0 ? avg : 1.0;
+}
+
+double SearchEngine::computeAvgChunkLengthUnlocked() const {
+    if (chunkLengths_.empty()) {
+        return 1.0;
+    }
+    long long sum = 0;
+    for (const auto& [_, len] : chunkLengths_) {
+        sum += len;
+    }
+    const double avg = static_cast<double>(sum) / static_cast<double>(chunkLengths_.size());
     return avg > 0.0 ? avg : 1.0;
 }
