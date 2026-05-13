@@ -643,7 +643,20 @@ void MainWindow::onChatMessage(const QString& msg) {
     ragBusy_ = true;
     statusBar()->showMessage(QString::fromUtf8("AI 正在思考..."));
 
-    const std::string q = msg.toStdString();
+    // 多文档覆盖模式下，明确告诉模型要逐篇总结，避免触发"无法回答"兜底
+    QString effectiveQuestion = msg;
+    if (ragContext.scopeLabel.contains(QStringLiteral("多文档覆盖"))) {
+        effectiveQuestion = QString::fromUtf8(
+            "下面【文档】中的每个【来源 N】对应系统里的一篇完整文档（已包含该文档的全部主要内容）。"
+            "请为每篇文档各给出一段简要总结，要求覆盖该文档的主要内容；"
+            "每篇文档只输出一段，按来源编号顺序排列，格式严格为：\n"
+            "[来源 1] 文档名：一段总结\n"
+            "[来源 2] 文档名：一段总结\n"
+            "...\n"
+            "不要回答\"无法回答\"。即使某篇文档是配置文件或测试代码，也要根据现有内容做出简要概括。\n\n"
+            "用户原始问题：") + msg;
+    }
+    const std::string q = effectiveQuestion.toStdString();
     const std::string c = ragContext.context.toStdString();
     RagEngine* engine = ragEngine_;
 
@@ -1037,11 +1050,17 @@ MainWindow::RagContextBundle MainWindow::buildRagContext(const QString& question
         focusFromQuestion = true;
     }
 
+    // 检测"多文档总结"意图：用户想让每篇文档都被覆盖到
+    const bool multiDocSummary = (focusDocId <= 0) && question.contains(QRegularExpression(
+        QStringLiteral("这几篇|每篇|分别|几篇文档|所有文档|全部文档|各篇|各个文档")));
+
     bundle.scopeLabel = focusDocId > 0
         ? (focusFromQuestion
                ? QString::fromUtf8("基于问题指定文档: %1").arg(focusDocTitle)
                : QString::fromUtf8("基于选中文档: %1").arg(focusDocTitle))
-        : QString::fromUtf8("基于全部文档");
+        : (multiDocSummary
+               ? QString::fromUtf8("基于全部文档（多文档覆盖）")
+               : QString::fromUtf8("基于全部文档"));
 
     std::vector<std::pair<int, double>> ranked;
 
@@ -1096,50 +1115,101 @@ MainWindow::RagContextBundle MainWindow::buildRagContext(const QString& question
         }
         std::sort(ranked.begin(), ranked.end(),
                   [](const auto& a, const auto& b) { return a.second > b.second; });
+
     }
 
     QStringList sourceLines;
     std::unordered_set<int> seenDocs;
     int used = 0;
-    for (const auto& [chunkId, _] : ranked) {
-        if (used >= kRagFinalTopK || bundle.context.size() >= kRagContextMaxChars) {
-            break;
-        }
+    const int maxChars  = multiDocSummary ? kRagContextMaxChars * 2 : kRagContextMaxChars;
 
-        DocumentChunk chunk;
+    if (multiDocSummary) {
+        // 多文档覆盖模式：每篇文档合并成一个 block，来源里也只显示一条。
+        // 每篇文档分配的字符上限：总 maxChars / 文档数，确保所有文档都能装下。
         try {
-            chunk = databaseManager_.getChunkById(chunkId);
-        } catch (...) {
-            continue;
-        }
+            const QVector<Document> allDocs = databaseManager_.searchDocuments(QString());
+            const int docCount = std::max(1, static_cast<int>(allDocs.size()));
+            const int perDocMaxChars = std::max(400, maxChars / docCount);
 
-        const QString title = normalizeTitle(chunk);
-        const QString marker = QString::fromUtf8("[来源 %1] %2 / 片段 %3")
-                                   .arg(used + 1)
-                                   .arg(title)
-                                   .arg(chunk.chunkIndex + 1);
-        QString block = marker + QStringLiteral("\n") + chunk.content.trimmed();
-        if (bundle.context.size() + block.size() > kRagContextMaxChars) {
-            const int remainingChars =
-                std::max(0, kRagContextMaxChars - static_cast<int>(bundle.context.size()));
-            block = block.left(remainingChars);
-        }
-        if (!bundle.context.isEmpty()) {
-            bundle.context += QStringLiteral("\n\n");
-        }
-        bundle.context += block;
-        sourceLines << marker;
+            for (const Document& doc : allDocs) {
+                const QVector<DocumentChunk> docChunks = databaseManager_.getChunksForDocument(doc.id);
+                if (docChunks.isEmpty()) continue;
 
-        RagSourceEntry entry;
-        entry.documentId = chunk.documentId;
-        entry.chunkId    = chunk.id;
-        entry.chunkIndex = chunk.chunkIndex;
-        entry.title      = title;
-        entry.chunkContent = chunk.content.trimmed();
-        bundle.entries.append(entry);
+                // 合并该文档所有 chunk 内容，直到达到 perDocMaxChars
+                QString merged;
+                for (const DocumentChunk& c : docChunks) {
+                    if (merged.size() >= perDocMaxChars) break;
+                    if (!merged.isEmpty()) merged += QStringLiteral("\n");
+                    merged += c.content.trimmed();
+                }
+                merged = merged.left(perDocMaxChars).trimmed();
+                if (merged.isEmpty()) continue;
 
-        seenDocs.insert(chunk.documentId);
-        ++used;
+                QString title = doc.title.trimmed();
+                if (title.isEmpty()) title = QFileInfo(doc.filePath).completeBaseName();
+
+                const QString marker = QString::fromUtf8("[来源 %1] %2")
+                                           .arg(used + 1)
+                                           .arg(title);
+                QString block = marker + QStringLiteral("\n") + merged;
+                if (!bundle.context.isEmpty()) bundle.context += QStringLiteral("\n\n");
+                bundle.context += block;
+                sourceLines << marker;
+
+                // 来源面板每篇只放一条，指向首个 chunk 以便跳转高亮
+                RagSourceEntry entry;
+                entry.documentId   = doc.id;
+                entry.chunkId      = docChunks.first().id;
+                entry.chunkIndex   = docChunks.first().chunkIndex;
+                entry.title        = title;
+                entry.chunkContent = docChunks.first().content.trimmed();
+                bundle.entries.append(entry);
+
+                seenDocs.insert(doc.id);
+                ++used;
+            }
+        } catch (...) {}
+    } else {
+        for (const auto& [chunkId, _] : ranked) {
+            if (used >= kRagFinalTopK || bundle.context.size() >= maxChars) {
+                break;
+            }
+
+            DocumentChunk chunk;
+            try {
+                chunk = databaseManager_.getChunkById(chunkId);
+            } catch (...) {
+                continue;
+            }
+
+            const QString title = normalizeTitle(chunk);
+            const QString marker = QString::fromUtf8("[来源 %1] %2 / 片段 %3")
+                                       .arg(used + 1)
+                                       .arg(title)
+                                       .arg(chunk.chunkIndex + 1);
+            QString block = marker + QStringLiteral("\n") + chunk.content.trimmed();
+            if (bundle.context.size() + block.size() > maxChars) {
+                const int remainingChars =
+                    std::max(0, maxChars - static_cast<int>(bundle.context.size()));
+                block = block.left(remainingChars);
+            }
+            if (!bundle.context.isEmpty()) {
+                bundle.context += QStringLiteral("\n\n");
+            }
+            bundle.context += block;
+            sourceLines << marker;
+
+            RagSourceEntry entry;
+            entry.documentId = chunk.documentId;
+            entry.chunkId    = chunk.id;
+            entry.chunkIndex = chunk.chunkIndex;
+            entry.title      = title;
+            entry.chunkContent = chunk.content.trimmed();
+            bundle.entries.append(entry);
+
+            seenDocs.insert(chunk.documentId);
+            ++used;
+        }
     }
 
     if (bundle.context.trimmed().isEmpty() && documentListWidget_) {
