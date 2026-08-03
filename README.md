@@ -19,6 +19,7 @@ OfflineKB 是一个基于 C++17、Qt6、SQLite 和 llama.cpp 的本地离线知�
 - 动态回答长度：简单答案、普通问答、总结、分析类问题使用不同生成上限。
 - 索引版本校验：保存 `chunks.meta.json`，校验 embedding 模型、向量维度和 chunk 数。
 - 模型状态查看：帮助菜单中可查看生成模型、embedding 模型、索引 chunk 数和 GPU/Vulkan 状态。
+- **MCP 集成**：通过 `offlinekb-cli` + Python MCP Server，将检索/问答暴露为 Agent Tool（见 [mcp/README.md](mcp/README.md)）。
 
 ## 技术栈
 
@@ -31,13 +32,16 @@ OfflineKB 是一个基于 C++17、Qt6、SQLite 和 llama.cpp 的本地离线知�
 - GGUF 生成模型
 - GGUF embedding 模型
 - Vulkan 后端（可选 GPU 加速）
+- Python MCP SDK（协议适配层，可选）
 
 ## 项目结构
 
 ```text
 OfflineKB/
-├── include/                 # 头文件
+├── include/                 # 头文件（含 KbService）
 ├── src/                     # 主程序源码
+├── tools/                   # offlinekb-cli headless 服务
+├── mcp/                     # Python MCP Server（协议适配）
 ├── tests/                   # 检索和 RAG 评测程序
 ├── resources/dict/          # cppjieba 词典资源
 ├── third_party/             # llama.cpp、hnswlib、cppjieba 等依赖
@@ -88,6 +92,25 @@ F:/OfflineKB/build/models/bge-small-zh-v1.5-q4_k_m.gguf
 ```
 
 如果没有找到真实 embedding 模型，系统会回退到哈希向量模式，但语义检索和 RAG 来源准确性会明显下降。
+
+## 克隆与依赖
+
+```bash
+git clone --recursive https://github.com/liliyliliy/OfflineKB.git
+cd OfflineKB
+```
+
+若未拉取子模块：
+
+```bash
+git submodule update --init --recursive
+```
+
+**llama.cpp** 不在仓库内（体积较大），需手动克隆到 `third_party/llama.cpp`：
+
+```bash
+git clone --depth 1 https://github.com/ggml-org/llama.cpp.git third_party/llama.cpp
+```
 
 ## 编译环境
 
@@ -286,6 +309,28 @@ F:/OfflineKB/build/models/bge-small-zh-v1.5-q4_k_m.gguf
 ### 5. 修改 embedding 模型后检索异常
 
 删除旧索引或直接重启程序。系统会通过 `chunks.meta.json` 检查模型名、维度和 chunk 数，不一致时自动重建。
+
+## MCP 集成（Agent Tool）
+
+OfflineKB 可将本地知识库暴露为 MCP Tool，供 Cursor 等 Agent 调用。
+
+```text
+Cursor -> Python mcp/server.py -> offlinekb-cli server (C++) -> KbService
+```
+
+**快速开始：**
+
+1. 编译 CLI：`cmake --build build --target offlinekb-cli`
+2. 安装 Python 依赖：`pip install -r mcp/requirements.txt`
+3. 配置 Cursor：见 [mcp/README.md](mcp/README.md)
+
+**可用 Tool：** `list_documents`、`search_kb`、`ask_rag`、`get_chunk`
+
+## 已知限制
+
+- **build 产物**：`CMakeCache.txt`、`build/` 下文件导入时会被跳过；已入库的 build 产物默认不参与 RAG 召回（见 `rag_policy`）。
+- **概念题 vs 面经**：概念型问题（如「RAG 流程」「技术栈」）会优先 README / `docs/`，并过滤面经类噪声；事实型问题（如「CMakeCache 里有什么」）不受影响。
+- **文档开关**：尚未实现 per-document「是否参与问答」GUI 开关（见下方后续优化）。
 
 ## 后续优化方向
 

@@ -8,6 +8,8 @@
 
 int main(int argc, char* argv[]) {
     QApplication app(argc, argv);
+    QCoreApplication::setOrganizationName(QStringLiteral("OfflineKB"));
+    QCoreApplication::setApplicationName(QStringLiteral("OfflineKB"));
 
     // 拷贝词典到临时目录（用于调试/兜底）
     const QString tmpDir =

@@ -1,6 +1,5 @@
-// =============================================================================
-// eval_qa.cpp
-// -----------------------------------------------------------------------------
+// eval_qa.cpp — RagEngine-only smoke tests (loads LLM). For retrieval regression without
+// LLM, see tests/eval_retrieval.cpp.
 // 离线问答评测：给定一组固定的 (上下文、问题、期望关键词) 三元组，
 // 跑 RagEngine.ask() 并按"包含关键词集中的任一关键词"做硬性 PASS/FAIL 判定。
 //

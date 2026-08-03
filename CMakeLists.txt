@@ -46,14 +46,12 @@ set(LLAMA_BUILD_COMMON   ON  CACHE BOOL "" FORCE)
 
 add_subdirectory(third_party/llama.cpp)
 
-# 主程序
-add_executable(OfflineKB
-    main.cpp
-    include/mainwindow.h
-    src/mainwindow.cpp
+set(OFFLINEKB_CORE_SOURCES
     include/databasemanager.h
     src/databasemanager.cpp
     include/document.h
+    include/kbservice.h
+    src/kbservice.cpp
     include/searchengine.h
     src/searchengine.cpp
     include/tokenizer.h
@@ -64,12 +62,11 @@ add_executable(OfflineKB
     src/embeddingengine.cpp
     include/ragengine.h
     src/ragengine.cpp
-    include/chatwidget.h
-    src/chatwidget.cpp
-    resources/dict.qrc
+    include/rag_policy.h
+    src/rag_policy.cpp
 )
 
-target_include_directories(OfflineKB PRIVATE
+set(OFFLINEKB_CORE_INCLUDE_DIRS
     include
     third_party/hnswlib
     third_party/cppjieba
@@ -78,11 +75,38 @@ target_include_directories(OfflineKB PRIVATE
     third_party/llama.cpp/include
 )
 
+# 主程序
+add_executable(OfflineKB
+    main.cpp
+    include/mainwindow.h
+    src/mainwindow.cpp
+    include/chatwidget.h
+    src/chatwidget.cpp
+    resources/dict.qrc
+    ${OFFLINEKB_CORE_SOURCES}
+)
+
+target_include_directories(OfflineKB PRIVATE ${OFFLINEKB_CORE_INCLUDE_DIRS})
+
 target_link_libraries(OfflineKB PRIVATE
     Qt6::Core
     Qt6::Widgets
     Qt6::Sql
     Qt6::Concurrent
+    SQLite3::SQLite3
+    llama
+)
+
+# headless CLI for MCP integration
+add_executable(offlinekb-cli
+    tools/offlinekb_cli.cpp
+    ${OFFLINEKB_CORE_SOURCES}
+)
+
+target_include_directories(offlinekb-cli PRIVATE ${OFFLINEKB_CORE_INCLUDE_DIRS})
+
+target_link_libraries(offlinekb-cli PRIVATE
+    Qt6::Core
     SQLite3::SQLite3
     llama
 )
@@ -129,3 +153,20 @@ target_include_directories(eval_qa PRIVATE
 target_link_libraries(eval_qa PRIVATE
     llama
 )
+
+add_executable(eval_retrieval
+    tests/eval_retrieval.cpp
+    ${OFFLINEKB_CORE_SOURCES}
+)
+
+target_include_directories(eval_retrieval PRIVATE ${OFFLINEKB_CORE_INCLUDE_DIRS})
+
+target_link_libraries(eval_retrieval PRIVATE
+    Qt6::Core
+    SQLite3::SQLite3
+    llama
+)
+
+enable_testing()
+add_test(NAME test_search COMMAND test_search)
+add_test(NAME eval_retrieval COMMAND eval_retrieval)

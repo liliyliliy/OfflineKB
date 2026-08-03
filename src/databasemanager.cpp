@@ -17,6 +17,36 @@ QString sqliteError(sqlite3* db, const QString& context) {
     const char* err = db ? sqlite3_errmsg(db) : "Unknown sqlite error";
     return context + ": " + QString::fromUtf8(err);
 }
+
+QString roamingConfigDir() {
+    const QByteArray appData = qgetenv("APPDATA");
+    if (!appData.isEmpty()) {
+        return QString::fromLocal8Bit(appData);
+    }
+    return QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation);
+}
+
+// GUI 与 headless CLI 共用固定目录，避免 QApplication 名称不同导致读到空库。
+QString resolveSharedAppDataDir() {
+    const QString roaming = roamingConfigDir();
+    const QString canonical = QDir(roaming).filePath(QStringLiteral("OfflineKB/OfflineKB"));
+    if (QFileInfo::exists(QDir(canonical).filePath(QStringLiteral("offlinekb.sqlite")))) {
+        return QDir(canonical).absolutePath();
+    }
+
+    const QString legacyCli = QDir(roaming).filePath(QStringLiteral("offlinekb-cli/OfflineKB"));
+    if (QFileInfo::exists(QDir(legacyCli).filePath(QStringLiteral("offlinekb.sqlite")))) {
+        return QDir(legacyCli).absolutePath();
+    }
+
+    const QString dynamic =
+        QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + "/OfflineKB";
+    if (QFileInfo::exists(dynamic + "/offlinekb.sqlite")) {
+        return dynamic;
+    }
+
+    return QDir(canonical).absolutePath();
+}
 }  // namespace
 
 DatabaseManager::DatabaseManager() : db_(nullptr) {}
@@ -29,8 +59,7 @@ DatabaseManager::~DatabaseManager() {
 }
 
 void DatabaseManager::initialize() {
-    appDataDir_ =
-        QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + "/OfflineKB";
+    appDataDir_ = resolveSharedAppDataDir();
     QDir dir;
     if (!dir.mkpath(appDataDir_)) {
         throw std::runtime_error(("Cannot create app data directory: " + appDataDir_).toStdString());
